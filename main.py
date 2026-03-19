@@ -1,7 +1,19 @@
 from ultralytics import YOLO
+import sys
 
-model_source="models\\yolo26n.pt"
+
+if len(sys.argv) < 2:
+    print("Usage: python main.py <media_path>")
+    sys.exit(1)
+
+file_path = sys.argv[1]
+
+model_source="models/yolo26n.pt"
 
 model = YOLO(model_source)
 
-results = model.predict(source="data\\TD_DIO5_Seance2_Box4_Groupe1_Part1_Up_left.mp4", show=True)
+try : 
+    model.overrides['classes'] = 0
+    results = model.predict(source=file_path, show=True)
+except KeyboardInterrupt:
+    print("Process interrupted by user.")

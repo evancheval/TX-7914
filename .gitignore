@@ -1,3 +1,4 @@
 data/*
-settings.json
 .python-version
+.vscode/*
+annotation/*
