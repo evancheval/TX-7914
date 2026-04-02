@@ -46,20 +46,17 @@ TITLE_COLOR = (255, 255, 255)
 
 def write_title(frame, title="", color=TITLE_COLOR):
     frame_h, frame_w = frame.shape[:2]
-    cv2.putText(frame, title, (int(0.02 * frame_h), int(0.08 * frame_h)), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 1)
+    cv2.putText(frame, title, (int(0.02 * frame_h), int(0.05 * frame_h)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-def write_lost_counter(frame, count, color=TITLE_COLOR):
+def write_lost_counter(frame, count, color=ADDITIONAL_BOX_COLOR):
     frame_h, frame_w = frame.shape[:2]
     label = f"Lost: {count}"
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.7
+    scale = 0.5
     thickness = 2
-    (text_w, text_h), baseline = cv2.getTextSize(label, font, scale, thickness)
-    padding = 8
+    (text_w, _), _ = cv2.getTextSize(label, font, scale, thickness)
     x = frame_w - text_w - 20
-    y = int(0.08 * frame_h)
-    cv2.rectangle(frame, (x - padding, y - text_h - padding),
-                  (x + text_w + padding, y + baseline + padding), (0, 0, 0), cv2.FILLED)
+    y = int(0.05 * frame_h)
     cv2.putText(frame, label, (x, y), font, scale, color, thickness)
 
 def draw_boxes(frame, boxes, color=BOX_COLOR):
@@ -74,7 +71,7 @@ def draw_boxes(frame, boxes, color=BOX_COLOR):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
 ###################################################
-# First method, not tested yet
+# Linear interpolation on nearest box method, not tested yet
   
 def find_near_boxes(boxes: Boxes, target_box: list, max_shift: int):
     target_x1, target_y1, target_x2, target_y2 = target_box
@@ -95,6 +92,11 @@ def find_nearest_box(boxes: Boxes, target_box: list, max_shift: int):
                                                      (box[2] - target_x2) ** 2 + (box[3] - target_y2) ** 2) ** 0.5)
     return nearest_box
 
+###################################################
+
+###################################################
+# Linear interpolation on missing id-box method
+
 def lost_ids(results_list: list[Results], target_index: int) -> list[int]:
     target_ids = results_list[target_index].boxes.id.cpu().numpy().astype(int)
     lost_ids = []
@@ -104,7 +106,6 @@ def lost_ids(results_list: list[Results], target_index: int) -> list[int]:
             if actual_id not in target_ids and actual_id not in lost_ids:
                 lost_ids.append(actual_id)
     return lost_ids
-
 
 def lost_bounding_box(results_list: list[Results], target_index: int) -> bool:
     n_boxes_on_target_frame = len(results_list[target_index].boxes.xyxy.cpu().numpy())
@@ -138,20 +139,15 @@ def interpolate_missing_boxes(results_list: list[Results], target_index: int) ->
     target_ids = get_ids_at(results_list, target_index)
 
     # All IDs seen in frames before target
-    before_ids: set[int] = set()
-    for i in range(target_index):
-        before_ids |= get_ids_at(results_list, i)
-
+    before_ids = get_ids_at(results_list, 0)
     missing_ids = before_ids - target_ids
     interpolated = []
 
     for track_id in missing_ids:
         # Last frame before target where this ID was present
         last_before = None
-        for i in range(target_index - 1, -1, -1):
-            if track_id in get_ids_at(results_list, i):
-                last_before = i
-                break
+        if track_id in get_ids_at(results_list, 0):
+            last_before = 0
         if last_before is None:
             continue
 
@@ -234,16 +230,14 @@ try:
                     draw_boxes(og_frame_w_boxes, boxes)
                     write_title(og_frame_w_boxes, title="Original box from the model")
                     draw_boxes(new_frame, boxes)
+                    write_title(new_frame, title="Output")
                     if interpolating:
                         interp_boxes = interpolate_missing_boxes(results_trough_time, target_index)
                         if interp_boxes:
                             draw_interpolated_boxes(new_frame, interp_boxes)
-                            write_title(new_frame, title="Interpolated")
-                        else:
-                            write_title(new_frame, title="Output")
                     else:
-                        write_title(new_frame, title="Output")
                         interp_boxes = []
+                    
 
                     interp_drop = max(0, og_drop - len(interp_boxes))
                     interp_lost_total += interp_drop
@@ -253,21 +247,18 @@ try:
 
                 concat_frame = cv2.hconcat([og_frame_w_boxes, new_frame])
                 cv2.imshow("Tracking", concat_frame)
-                # time.sleep(0.5)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
             prev_box_count = current_box_count
 
         results_trough_time.append(r)
-        if len(results_trough_time) > args.gap_frame:
+        if len(results_trough_time) > length_of_buffer:
             results_trough_time.pop(0)
-
-    if args.show:
-        time.sleep(1)
-        cv2.destroyAllWindows()
 
 except KeyboardInterrupt:
     print("Process interrupted by user.")
+finally:
     if args.show:
+        time.sleep(1)
         cv2.destroyAllWindows()
