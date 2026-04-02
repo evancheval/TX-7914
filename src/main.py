@@ -1,6 +1,7 @@
 from ultralytics import YOLO #type:ignore
 import argparse
 import cv2
+import numpy as np
 from ultralytics.engine.results import Boxes, Results
 import time
 
@@ -40,12 +41,26 @@ def parse_args() -> argparse.Namespace:
 
 
 BOX_COLOR = (255, 77, 54)
-ADDITIONAL_BOX_COLOR = (255, 0, 0)
+ADDITIONAL_BOX_COLOR = (155, 155, 255)
 TITLE_COLOR = (255, 255, 255)
 
 def write_title(frame, title="", color=TITLE_COLOR):
     frame_h, frame_w = frame.shape[:2]
     cv2.putText(frame, title, (int(0.02 * frame_h), int(0.08 * frame_h)), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 1)
+
+def write_lost_counter(frame, count, color=TITLE_COLOR):
+    frame_h, frame_w = frame.shape[:2]
+    label = f"Lost: {count}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.7
+    thickness = 2
+    (text_w, text_h), baseline = cv2.getTextSize(label, font, scale, thickness)
+    padding = 8
+    x = frame_w - text_w - 20
+    y = int(0.08 * frame_h)
+    cv2.rectangle(frame, (x - padding, y - text_h - padding),
+                  (x + text_w + padding, y + baseline + padding), (0, 0, 0), cv2.FILLED)
+    cv2.putText(frame, label, (x, y), font, scale, color, thickness)
 
 def draw_boxes(frame, boxes, color=BOX_COLOR):
     xyxy = boxes.xyxy.cpu().numpy().astype(int)
@@ -96,6 +111,77 @@ def lost_bounding_box(results_list: list[Results], target_index: int) -> bool:
             return True
     return False
 
+def get_ids_at(results_list: list[Results], index: int) -> set[int]:
+    boxes = results_list[index].boxes
+    if boxes.id is None:
+        return set()
+    return set(boxes.id.cpu().numpy().astype(int).tolist())
+
+def get_box_for_id(results_list: list[Results], index: int, track_id: int) -> np.ndarray | None:
+    boxes = results_list[index].boxes
+    if boxes.id is None:
+        return None
+    ids = boxes.id.cpu().numpy().astype(int)
+    xyxy = boxes.xyxy.cpu().numpy()
+    for i, tid in enumerate(ids):
+        if tid == track_id:
+            return xyxy[i]
+    return None
+
+def interpolate_missing_boxes(results_list: list[Results], target_index: int) -> list[tuple[np.ndarray, int]]:
+    """For IDs missing at target_index but present before AND after,
+    compute linearly interpolated bounding boxes.
+    Returns list of (xyxy, track_id) tuples."""
+    target_ids = get_ids_at(results_list, target_index)
+
+    # All IDs seen in frames before target
+    before_ids: set[int] = set()
+    for i in range(target_index):
+        before_ids |= get_ids_at(results_list, i)
+
+    missing_ids = before_ids - target_ids
+    interpolated = []
+
+    for track_id in missing_ids:
+        # Last frame before target where this ID was present
+        last_before = None
+        for i in range(target_index - 1, -1, -1):
+            if track_id in get_ids_at(results_list, i):
+                last_before = i
+                break
+        if last_before is None:
+            continue
+
+        # First frame after target where this ID reappears
+        first_after = None
+        for i in range(target_index + 1, len(results_list)):
+            if track_id in get_ids_at(results_list, i):
+                first_after = i
+                break
+        if first_after is None:
+            continue
+
+        box_before = get_box_for_id(results_list, last_before, track_id)
+        box_after = get_box_for_id(results_list, first_after, track_id)
+        if box_before is None or box_after is None:
+            continue
+
+        # Linear interpolation
+        total_gap = first_after - last_before
+        t = (target_index - last_before) / total_gap
+        interp_box = box_before + t * (box_after - box_before)
+        interpolated.append((interp_box.astype(int), track_id))
+
+    return interpolated
+
+def draw_interpolated_boxes(frame, interpolated_boxes, color=ADDITIONAL_BOX_COLOR):
+    for (box, track_id) in interpolated_boxes:
+        x1, y1, x2, y2 = box
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        label = f"{track_id}*"
+        cv2.putText(frame, label, ((x1 + x2)//2 - 5*len(label), (y1 + y2)//2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
 ###################################################
 
 
@@ -112,6 +198,9 @@ try:
     model.overrides['classes'] = 0
 
     results_trough_time = []
+    og_lost_total = 0
+    interp_lost_total = 0
+    prev_box_count = 0
 
     results = model.track(source=file_path, save=args.save, stream=True, verbose=False, show_labels=False)
     for r in results:
@@ -125,7 +214,13 @@ try:
             else:
                 # Not enough frames for interpolation, use the current result
                 res = r
-            if args.show:                
+
+            # Count lost bounding boxes (drop vs previous frame)
+            current_box_count = len(res.boxes.xyxy) if res.boxes is not None else 0
+            og_drop = max(0, prev_box_count - current_box_count)
+            og_lost_total += og_drop
+
+            if args.show:
                 boxes = res.boxes
                 og_frame_w_boxes = res.orig_img.copy()
                 new_frame = res.orig_img.copy()
@@ -135,16 +230,30 @@ try:
                     draw_boxes(og_frame_w_boxes, boxes)
                     write_title(og_frame_w_boxes, title="Original box from the model")
                     draw_boxes(new_frame, boxes)
-                    if interpolating and lost_bounding_box(results_trough_time, median_index):
-                        write_title(new_frame, title="LOST BOX")
+                    if interpolating:
+                        interp_boxes = interpolate_missing_boxes(results_trough_time, median_index)
+                        if interp_boxes:
+                            draw_interpolated_boxes(new_frame, interp_boxes)
+                            write_title(new_frame, title="Interpolated")
+                        else:
+                            write_title(new_frame, title="Output")
                     else:
                         write_title(new_frame, title="Output")
+                        interp_boxes = []
+
+                    interp_drop = max(0, og_drop - len(interp_boxes))
+                    interp_lost_total += interp_drop
+
+                    write_lost_counter(og_frame_w_boxes, og_lost_total)
+                    write_lost_counter(new_frame, interp_lost_total)
 
                 concat_frame = cv2.hconcat([og_frame_w_boxes, new_frame])
                 cv2.imshow("Tracking", concat_frame)
                 # time.sleep(0.5)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
+
+            prev_box_count = current_box_count
 
         results_trough_time.append(r)
         if len(results_trough_time) > args.gap_frame:
