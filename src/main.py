@@ -104,13 +104,15 @@ try:
     model.overrides['classes'] = 0
 
     results_trough_time = []
+
+    i = 0
     
     results = model.track(source=file_path, save=args.save, stream=True, verbose=False, show_labels=False)
     for r in results:
-        if len(results_trough_time) > median_index & len(results_trough_time) < args.gap_frame:
-            # Wait until we have enough frames to start interpolation on the first frame available
-            pass
-        else:
+        # If the following condition is not true, it means that we don't have enough frames to start interpolation,
+        # but that we still got the first frame to interpolate on, then we wait until we have enough frames to start
+        # interpolation on it (collecting "future frames")
+        if not(len(results_trough_time) > median_index & len(results_trough_time) < args.gap_frame):
             interpolating: bool = len(results_trough_time) >= args.gap_frame
             if interpolating:
                 res = results_trough_time[median_index]
@@ -127,10 +129,10 @@ try:
                     draw_boxes(og_frame_w_boxes, boxes)
                     write_title(og_frame_w_boxes, title="Original box from the model")
                     draw_boxes(new_frame, boxes)
-                    if interpolating and lost_id(results_trough_time, median_index):
-                        write_title(new_frame, title="LOST ID")
-                    else:
-                        write_title(new_frame, title="Output")
+                    # if interpolating and lost_id(results_trough_time, median_index):
+                    #     write_title(new_frame, title="LOST ID")
+                    # else:
+                    #     write_title(new_frame, title="Output")
 
                 concat_frame = cv2.hconcat([og_frame_w_boxes, new_frame])
                 cv2.imshow("Tracking", concat_frame)
@@ -138,7 +140,8 @@ try:
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
-
+        print(f"Frame {i} processed. len(results_trough_time)={len(results_trough_time)}")
+        i += 1
         results_trough_time.append(r)
         if len(results_trough_time) > args.gap_frame:
             results_trough_time.pop(0)
