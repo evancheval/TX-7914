@@ -84,7 +84,15 @@ def lost_id(results_list: list[Results], target_index: int) -> bool:
     target_ids = results_list[target_index].boxes.id.cpu().numpy().astype(int)
     for i in range(target_index-1, -1, -1):
         actual_ids = results_list[i].boxes.id.cpu().numpy().astype(int)
-        if not any(id in target_ids for id in actual_ids):
+        if any(id not in target_ids for id in actual_ids):
+            return True
+    return False
+
+def lost_bounding_box(results_list: list[Results], target_index: int) -> bool:
+    n_boxes_on_target_frame = len(results_list[target_index].boxes.xyxy.cpu().numpy())
+    for i in range(target_index-1, -1, -1):
+        n_boxes_on_actual_frame = len(results_list[i].boxes.xyxy.cpu().numpy())
+        if n_boxes_on_actual_frame < n_boxes_on_target_frame:
             return True
     return False
 
@@ -105,14 +113,12 @@ try:
 
     results_trough_time = []
 
-    i = 0
-    
     results = model.track(source=file_path, save=args.save, stream=True, verbose=False, show_labels=False)
     for r in results:
         # If the following condition is not true, it means that we don't have enough frames to start interpolation,
         # but that we still got the first frame to interpolate on, then we wait until we have enough frames to start
         # interpolation on it (collecting "future frames")
-        if not(len(results_trough_time) > median_index & len(results_trough_time) < args.gap_frame):
+        if not(len(results_trough_time) > median_index and len(results_trough_time) < args.gap_frame):
             interpolating: bool = len(results_trough_time) >= args.gap_frame
             if interpolating:
                 res = results_trough_time[median_index]
@@ -129,10 +135,10 @@ try:
                     draw_boxes(og_frame_w_boxes, boxes)
                     write_title(og_frame_w_boxes, title="Original box from the model")
                     draw_boxes(new_frame, boxes)
-                    # if interpolating and lost_id(results_trough_time, median_index):
-                    #     write_title(new_frame, title="LOST ID")
-                    # else:
-                    #     write_title(new_frame, title="Output")
+                    if interpolating and lost_bounding_box(results_trough_time, median_index):
+                        write_title(new_frame, title="LOST BOX")
+                    else:
+                        write_title(new_frame, title="Output")
 
                 concat_frame = cv2.hconcat([og_frame_w_boxes, new_frame])
                 cv2.imshow("Tracking", concat_frame)
@@ -140,8 +146,6 @@ try:
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
-        print(f"Frame {i} processed. len(results_trough_time)={len(results_trough_time)}")
-        i += 1
         results_trough_time.append(r)
         if len(results_trough_time) > args.gap_frame:
             results_trough_time.pop(0)
