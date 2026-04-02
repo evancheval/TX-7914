@@ -33,6 +33,28 @@ Par ailleurs, le script accepte désormais un second argument optionnel en ligne
 
 Quatre runs de tracking sont présents dans `runs/detect/` (track, track2, track3, track4), dont deux ont produit des vidéos annotées conservées : `track3/output-12m-to-20m.avi` et `track4/output-12m-to-20m-5fps.avi`. Ces résultats correspondent à des tests sur la fenêtre expérimentale de référence (12m–20m) avec des cadences d'entrée différentes, ce qui permet de comparer visuellement la stabilité des IDs selon le sous-échantillonnage temporel appliqué en amont.
 
+### Interpolation de boîtes manquantes et raffinement du tracking (avril 2026)
+
+Une nouvelle itération en cours (changements non-committés au 02/04) porte le script main.py vers une logique beaucoup plus sophistiquée. L'enjeu central abordé est la stabilisation des IDs lorsqu'une personne disparaît temporairement du cadre de détection (occultation, pose ambiguë, etc.). Le script implémente désormais une stratégie d'interpolation temporelle sur une fenêtre glissante de frames (`gap_frame`).
+
+La nouvelle interface CLI utilise argparse avec quatre paramètres majeurs :
+- `input` : chemin du fichier média à traiter,
+- `--show` : affiche deux vidéos côte à côte (détections originales vs résultat traité),
+- `--save` : enregistre la vidéo annotée dans `runs/detect/`,
+- `--model_path` : permet de basculer entre modèles légers et lourds,
+- `--gap_frame` : nombre maximal de frames conservées dans l'historique pour interpolation (par défaut 10),
+- `--max-box-shift` : seuil en pixels pour considérer deux boîtes comme étant la même personne entre deux frames (par défaut 10, calibré pour résolution 360×640).
+
+Le cœur du traitement repose sur plusieurs fonctions complémentaires :
+
+1. **draw_boxes()** : affiche les boîtes englobantes et les identifiants au centre géométrique de chaque personne détectée (amélioration visuelle par rapport à l'affichage au coin).
+
+2. **find_near_boxes()** et **find_nearest_box()** : implémentent la logique d'interpolation. Lorsqu'une boîte disparaît d'une frame à une autre, ces fonctions cherchent la boîte la plus proche dans les frames suivantes en utilisant une distance euclidienne sur les quatre coins (x1, y1, x2, y2). Le seuil `max-box-shift` limite la recherche pour éviter les fausses associations.
+
+3. **lost_id()** : détecte si un ID (identifiant de personne) a été "perdu" entre deux frames — c'est-à-dire si une personne s'est volontairement retirée de la scène ou s'est occultée au-delà du seuil d'interpolation. Cette information est affichée en superposition sur la vidéo de sortie ("LOST ID").
+
+Le traitement utilise `model.track()` en mode streaming (`stream=True`), ce qui permet de traiter des vidéos de grande taille sans charger la totalité en mémoire. À chaque nouvelle frame, le script accumule les résultats dans un historique (`results_trough_time`) limité à `gap_frame` éléments. Une fois l'historique suffisamment rempli, il applique une interpolation en prenant la frame au centre temporel de la fenêtre (index `median_index`), ce qui lisse les apparus/disparitions ponctuelles tout en conservant une latence acceptable. L'affichage côte à côte (avec cv2.hconcat) permet de comparer en temps réel les boîtes originales du modèle avec les boîtes interpolées.
+
 ## Travail technique réalisé sur la préparation des vidéos
 Le document ffmpeg-cmds formalise plusieurs commandes utilitaires qui ont servi aux tests. Leur logique est importante pour la reprise car elle conditionne la qualité des données d'entrée.
 
@@ -60,22 +82,44 @@ Les images annotation/ids-1.png et annotation/ids-2.png confirment un travail ma
 Les comptes rendus de réunion indiquent plusieurs tests et hypothèses : comparer plusieurs familles de détecteurs (YOLO, RT-DETR, RF-DETR), comprendre la logique d'association d'IDs de YOLO dans la littérature, expérimenter une exécution YOLO sur une frame sur n pour réduire la charge, et envisager une approche d'embeddings moyens sur l'historique pour stabiliser l'identité. Ces pistes montrent une stratégie itérative qui alterne expérimentation pratique et appui bibliographique.
 
 ## Choix techniques et arbitrages observés
-Le principal arbitrage à ce stade est un arbitrage de maturité : conserver YOLO comme base opérationnelle immédiate, tout en documentant des alternatives plus performantes en précision potentielle. Ce choix est cohérent avec la contrainte de prototypage rapide et avec la nécessité de disposer d'un pipeline exécutable en continu.
+Le principal arbitrage observé dans l'évolution du projet reflète une transition : passage d'une approche purement basée sur la détection indépendante (predict) vers une approche hybride alliant tracking natif et interpolation spatiale. Ce pivot est motivé par l'observation que la persistance d'identité dépend moins de la précision brute de détection que de la cohérence géométrique d'une frame à la suivante, surtout dans un contexte de vidéo statique (réunion dans une salle).
+
+Un arbitrage de maturité maintient YOLO comme base opérationnelle, avec une alternative (modèle 26x) disponible pour comparaison, plutôt que de chercher à changer complètement de famille de détecteur.
 
 Un second arbitrage concerne les données : les fichiers volumineux de type vidéos, annotations brutes et dossiers locaux sont ignorés par Git. Cela facilite le versionnement des scripts et documents, mais impose pour la reprise de bien transmettre les chemins, formats et procédures d'extraction. Les documents déjà présents couvrent une partie de ce besoin, notamment via les commandes ffmpeg et la note timerange.
 
-Enfin, la trajectoire de travail montre un positionnement clair : la détection seule n'est pas considérée comme suffisante, et le coeur de la valeur attendue se situe dans la stabilisation d'identité lorsque les bounding boxes disparaissent ou se réassignent. Les notes du 20/03 insistent d'ailleurs sur le fait que, hors zone de sortie (porte), une personne ne devrait pas "disparaître" logiquement de la scène ; cette contrainte de bon sens est transformée en piste algorithmique de ré-association.
+Enfin, la trajectoire de travail montre une orientation claire : la détection seule n'est pas considérée comme suffisante, et le cœur de la valeur attendue se situe dans la stabilisation d'identité lorsque les bounding boxes disparaissent ou se réassignent. Les notes du 20/03 insistent d'ailleurs sur le fait que, hors zone de sortie (porte), une personne ne devrait pas "disparaître" logiquement de la scène ; cette contrainte de bon sens est maintenant transformée en piste algorithmique de ré-association via interpolation.
 
 ## Pistes suivies et pistes encore envisagées
 
-La piste du tracking natif YOLO via `model.track` est désormais opérationnelle et constitue le principal fil de travail : il s'agit à présent d'évaluer la qualité de la persistance des IDs sur la fenêtre de référence et de comprendre dans quels cas le tracker perd ou réattribue un identifiant à une personne déjà connue.
+Le fil principal de travail est maintenant clairement l'**interpolation temporelle de boîtes manquantes** couplée au tracking natif. L'intuition clé est que dans une scène de réunion, les pertes ponctuelles de détection (1 à quelques frames) ne devraient pas entraîner un nouvel identifiant pour une personne : il suffit de faire correspondre géométriquement la boîte de la frame suivante avec la dernière boîte connue. Cette approche hybride (tracking YOLO + interpolation spatiale) vise à réduire le nombre de changements d'ID tout en gardant une latence minimale.
 
-La piste de pré-traitement par soustraction de fond a été initiée avec deux algorithmes (approche manuelle et MOG2) et reste ouverte, avec un réglage fin de MOG2 comme prochain objectif court terme. L'idée d'afficher les IDs au centre géométrique des personnes plutôt qu'au coin de la bounding box est également retenue comme amélioration d'affichage à intégrer.
+La piste de **pré-traitement par soustraction de fond** (MOG2) reste ouverte mais moins prioritaire en ce moment ; elle pourrait être intégrée en amont du tracking si les tests d'interpolation révèlent que le problème principal est le bruit de détection plutôt que la perte de tracking.
 
-Parmi les pistes encore non tranchées, on trouve l'utilisation d'indices de couleur pour enrichir la ré-identification en cas de perte de tracking, la comparaison entre modèle léger (`yolo26n`) et modèle plus lourd (`yolo26x`) sur la stabilité des IDs, et l'étude plus poussée de la littérature sur la ré-identification de personnes. Le projet conserve une ouverture méthodologique délibérée, sans figer prématurément l'architecture de la solution.
+L'**affichage visuel des identifiants au centre des bounding boxes** a été implémenté, ce qui améliore la lisibilité en cas de résolution variable.
+
+Une piste **détection de perte d'ID** (`lost_id()`) a été ajoutée pour mettre en évidence dans la vidéo de sortie les moments où une personne a logiquement quitté la scène plutôt que d'être simplement occultée temporairement.
+
+Parmi les pistes encore envisagées mais non tranchées, on trouve l'affinement des paramètres `gap_frame` et `max-box-shift` via une validation sur le corpus d'annotations existant, l'exploration d'autres trackers (Kalman, Deep SORT) en remplacement de ByteTrack, et l'éventuel ajout d'une couche d'embeddings pour enrichir la ré-identification en cas de vrai changement d'identité plutôt que simple perte.
 
 ## État actuel pour une équipe de reprise
 
-À la date de ce suivi (début avril 2026), le projet dispose d'un pipeline de tracking fonctionnel basé sur `model.track` d'Ultralytics, de plusieurs vidéos annotées produites par les runs de test, et d'une fenêtre expérimentale de référence bien définie (12m–20m, vidéo `TD_DIO5_Seance2_Box4_Groupe1_Part1_Up_left.mp4`). Des annotations comportementales manuelles sont disponibles pour servir de vérité terrain partielle.
+À la date de ce suivi (début avril 2026), le projet dispose d'un **pipeline de tracking avec interpolation temporelle** en cours de développement (code non-commis au 02/04). Le code formalise une approche hybride : utilisation du tracker natif YOLO pour l'association d'identités entre frames successives, couplée à une logique d'interpolation géométrique pour récupérer les IDs lorsqu'une personne disparaît temporairement du champ de détection.
 
-Le prochain travail critique est double : d'une part, évaluer quantitativement la stabilité des IDs produits par le tracker sur la fenêtre de référence (nombre de changements d'ID par personne, taux de perte de tracking) ; d'autre part, affiner le pré-traitement par soustraction de fond pour améliorer la qualité des détections en entrée du tracker. Pour une reprise efficace, il est recommandé de commencer par visionner les vidéos dans `runs/detect/track3/` et `runs/detect/track4/`, de les comparer aux annotations du fichier `annotation/12m-20m-annotation.csv`, puis de procéder à une exploration des paramètres MOG2 avant d'envisager des modifications plus profondes de l'architecture.
+Les artefacts produits incluent :
+- Plusieurs vidéos annotées dans `runs/detect/track*/` issues des tests précédents,
+- Annotations comportementales manuelles (`annotation/12m-20m-annotation.csv`) servant de vérité terrain,
+- Une fenêtre expérimentale de référence bien définie (12m–20m, vidéo `TD_DIO5_Seance2_Box4_Groupe1_Part1_Up_left.mp4` à 25 fps),
+- Paramètres de préparation vidéo documentés (extraction via ffmpeg, sous-échantillonnage temporel).
+
+Le prochain travail critique comprend :
+1. **Tester et valider** les paramètres d'interpolation (`gap_frame`, `max-box-shift`) sur la fenêtre de référence en comparaison avec les annotations manuelles,
+2. **Mesurer quantitativement** la réduction du bruit d'ID (nombre de changements d'identifiant par personne et par vidéo),
+3. **Affiner ou explorer d'autres trackers** si l'interpolation seule ne suffit pas,
+4. **Committer et documenter** les changements une fois validés.
+
+Pour une reprise efficace, il est recommandé de :
+- Relancer le script déjà amélioré avec `--show` pour observer visuellement l'effet de l'interpolation sur la fenêtre 12m–20m,
+- Comparer les vidéos générées avec le fichier d'annotations pour quantifier les gains en termes de stabilité d'ID,
+- Explorer les valeurs de `gap_frame` et `max-box-shift` adaptées à la résolution réelle des vidéos testées (pas nécessairement 360×640),
+- Intégrer le pré-traitement MOG2 seulement si les résultats d'interpolation seule restent insuffisants.
