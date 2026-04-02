@@ -1,4 +1,4 @@
-from ultralytics import YOLO
+from ultralytics import YOLO #type:ignore
 import argparse
 import cv2
 from ultralytics.engine.results import Boxes, Results
