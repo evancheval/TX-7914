@@ -80,13 +80,16 @@ def find_nearest_box(boxes: Boxes, target_box: list, max_shift: int):
                                                      (box[2] - target_x2) ** 2 + (box[3] - target_y2) ** 2) ** 0.5)
     return nearest_box
 
-def lost_id(results_list: list[Results], target_index: int) -> bool:
+def lost_ids(results_list: list[Results], target_index: int) -> list[int]:
     target_ids = results_list[target_index].boxes.id.cpu().numpy().astype(int)
+    lost_ids = []
     for i in range(target_index-1, -1, -1):
         actual_ids = results_list[i].boxes.id.cpu().numpy().astype(int)
-        if any(id not in target_ids for id in actual_ids):
-            return True
-    return False
+        for actual_id in actual_ids:
+            if actual_id not in target_ids and actual_id not in lost_ids:
+                lost_ids.append(actual_id)
+    return lost_ids
+
 
 def lost_bounding_box(results_list: list[Results], target_index: int) -> bool:
     n_boxes_on_target_frame = len(results_list[target_index].boxes.xyxy.cpu().numpy())
@@ -101,7 +104,7 @@ def lost_bounding_box(results_list: list[Results], target_index: int) -> bool:
 
 args = parse_args()
 
-median_index = args.gap_frame // 2
+target_index = 1 # Second image of the buffer, as the first frame is the previous
 
 file_path = args.input
 model_source = args.model_path
@@ -112,16 +115,17 @@ try:
     model.overrides['classes'] = 0
 
     results_trough_time = []
+    length_of_buffer = args.gap_frame + 2 # first frame is the previous, second frame is the target, and the rest are future frames for interpolation
 
     results = model.track(source=file_path, save=args.save, stream=True, verbose=False, show_labels=False)
     for r in results:
         # If the following condition is not true, it means that we don't have enough frames to start interpolation,
         # but that we still got the first frame to interpolate on, then we wait until we have enough frames to start
         # interpolation on it (collecting "future frames")
-        if not(len(results_trough_time) > median_index and len(results_trough_time) < args.gap_frame):
-            interpolating: bool = len(results_trough_time) >= args.gap_frame
+        if len(results_trough_time)!=0:
+            interpolating: bool = len(results_trough_time) >= length_of_buffer
             if interpolating:
-                res = results_trough_time[median_index]
+                res = results_trough_time[target_index]
             else:
                 # Not enough frames for interpolation, use the current result
                 res = r
@@ -135,7 +139,7 @@ try:
                     draw_boxes(og_frame_w_boxes, boxes)
                     write_title(og_frame_w_boxes, title="Original box from the model")
                     draw_boxes(new_frame, boxes)
-                    if interpolating and lost_bounding_box(results_trough_time, median_index):
+                    if interpolating and lost_bounding_box(results_trough_time, target_index):
                         write_title(new_frame, title="LOST BOX")
                     else:
                         write_title(new_frame, title="Output")
