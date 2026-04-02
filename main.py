@@ -3,7 +3,7 @@ import sys
 
 SHOW = False
 SAVE = True
-
+# test
 if len(sys.argv) < 2:
     print("Usage: python main.py <media_path>")
     sys.exit(1)
