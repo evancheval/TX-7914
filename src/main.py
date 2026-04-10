@@ -2,7 +2,7 @@ from ultralytics import YOLO #type:ignore
 from typing import Generator
 import argparse
 import cv2
-from ultralytics.engine.results import Results
+from ultralytics.utils import TQDM
 import time
 import csv
 
@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
         "--model_path",
         default="models/yolo26n.pt",
         help="Path to YOLO model weights",
+    )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress bar during processing",
     )
     parser.add_argument(
         "--gap_frame",
@@ -100,16 +105,20 @@ try:
     og_lost_total = 0
     interp_lost_total = 0
     prev_box_count = 0
+    progress_bar = None
     length_of_buffer = args.gap_frame + 2 # first frame is the previous, second frame is the target, and the rest are future frames for interpolation
     frame_index = 0
     raw_results_to_save_buffer: list[ReductedResults] = [] # List of ReductedResults to save to csv at the end of processing
     edited_results_to_save_buffer: list[ReductedResults] = [] # List of ReductedResults with interpolated boxes added, to save to csv at the end of processing
 
-    if args.from_results_file or args.save_video:
+    if args.from_results_file or args.save_video or args.progress:
         cap = cv2.VideoCapture(args.input)
     
         if args.save_video:
             video_out = init_output_video(file_name, cap)
+        if args.progress:
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            progress_bar = TQDM(total=total_frames if total_frames > 0 else None, desc="Processing", unit="frame", mininterval=0.5)
 
     if args.from_results_file:
         results_file = open(args.from_results_file, "r")
@@ -136,6 +145,8 @@ try:
         if args.save:
             raw_results_to_save_buffer.append(first_res)
     frame_index += 1
+    if progress_bar is not None:
+        progress_bar.update(1)
     prev_box_count = first_res.get_number_of_boxes()
     results_trough_time.append(first_res)
     
@@ -197,6 +208,8 @@ try:
                         flush_results_buffers(raw_results_to_save_buffer, edited_results_to_save_buffer, file_name)
             
             frame_index += 1
+            if progress_bar is not None:
+                progress_bar.update(1)
             prev_box_count = current_box_count
 
         results_trough_time.append(r)
@@ -206,9 +219,11 @@ try:
 except KeyboardInterrupt:
     print("Process interrupted by user.")
 finally:
+    if progress_bar is not None:
+        progress_bar.close()
     results.close()  # Ensure resources are released
     results_file.close() if args.from_results_file else None
-    if args.save_video or args.from_results_file:
+    if args.save_video or args.from_results_file or args.progress:
         cap.release()
         if args.save_video:
             video_out.release()
