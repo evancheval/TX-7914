@@ -22,7 +22,7 @@ def init_output_files(file_name: str):
 
 def result_to_csv_row(res: ReductedResults) -> list[dict]:
     rows: list[dict] = []
-    for (box, conf, track_id) in zip(res.xyxys, res.confs, res.ids):
+    for (box, conf, track_id, interpolated) in zip(res.xyxys, res.confs, res.ids, res.interpolated):
         x1, y1, x2, y2 = box
         row = {
             "frame_index": res.frame_index,
@@ -32,7 +32,7 @@ def result_to_csv_row(res: ReductedResults) -> list[dict]:
             "x2": x2,
             "y2": y2,
             "confidence": conf,
-            "interpolated": res.interpolated
+            "interpolated": interpolated
         }
         rows.append(row)
     return rows

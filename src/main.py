@@ -4,6 +4,7 @@ import argparse
 import cv2
 from ultralytics.engine.results import Results
 import time
+import csv
 
 from my_types import ReductedResults
 from utils.showing import write_title, write_lost_counter, draw_boxes, draw_interpolated_boxes
@@ -24,6 +25,10 @@ def parse_args() -> argparse.Namespace:
         "--save",
         action="store_true",
         help="Save tracking output to disk, csv format",
+    )
+    parser.add_argument(
+        "--from-results-file",
+        help="Path to a csv file containing precomputed results (got from the --save flag)",
     )
     parser.add_argument(
         "--model_path",
@@ -75,17 +80,17 @@ global edited_results_to_save_buffer
 
 args = parse_args()
 
+if args.save and args.from_results_file:
+    raise ValueError("Cannot use --save option when --from-boxes-file is provided, as the boxes are precomputed and saved in the provided file, so there is no need to save them again.")
+
 target_index = 1 # Second image of the buffer, as the first frame is the previous
 
 file_path = args.input
 file_name = file_path.split("/")[-1].split(".")[0] if "/" in file_path else file_path.split("\\")[-1].split(".")[0]
-init_output_files(file_name)
-model_source = args.model_path
-model = YOLO(model_source)
+if args.save:
+    init_output_files(file_name)
 
 try:
-    model.overrides['classes'] = 0
-
     results_trough_time : list[ReductedResults] = []
     og_lost_total = 0
     interp_lost_total = 0
@@ -95,11 +100,19 @@ try:
     raw_results_to_save_buffer: list[ReductedResults] = [] # List of ReductedResults to save to csv at the end of processing
     edited_results_to_save_buffer: list[ReductedResults] = [] # List of ReductedResults with interpolated boxes added, to save to csv at the end of processing
 
-    results : Generator[Results] = model.track(source=file_path, save=False, stream=True, verbose=False, show_labels=False)
+    if args.from_results_file:
+        results_file = open(args.from_results_file, "r")
+        csv_reader = csv.DictReader(results_file)
+        results: Generator[ReductedResults] = ReductedResults.reducted_results_from_dict_reader(csv_reader, capture=cv2.VideoCapture(args.input))
+
+    else:            
+        model_source = args.model_path
+        model = YOLO(model_source)
+        model.overrides['classes'] = 0
+        results: Generator[ReductedResults] = ReductedResults.from_results_generator(model.track(source=file_path, save=False, stream=True, verbose=False))
 
     # Processing first frame as we cannot add more info than YOLO has, as it is the first frame.
-    first_res_raw = next(results)
-    first_res = ReductedResults.from_boxes(frame_index, first_res_raw.orig_img, first_res_raw.boxes)
+    first_res = next(results)
     if args.show or args.save:
         first_frame = first_res.orig_img.copy()
         if first_res.get_number_of_boxes() > 0:
@@ -119,11 +132,14 @@ try:
         # If the following condition is not true, it means that we don't have enough frames to start interpolation,
         # but that we still got the first frame to interpolate on, then we wait until we have enough frames to start
         # interpolation on it (i.e. collecting "future frames")
-        if len(results_trough_time) >= length_of_buffer:
-            res = results_trough_time[target_index]
+        if len(results_trough_time) >= length_of_buffer or (args.from_results_file):
+            res = results_trough_time[target_index] if not args.from_results_file else r
 
             # Count lost bounding boxes (drop vs previous frame)
-            current_box_count = res.get_number_of_boxes()
+            if args.from_results_file:
+                current_box_count = res.interpolated.count(False)
+            else:
+                current_box_count = res.get_number_of_boxes()
             og_drop = max(0, prev_box_count - current_box_count)
             og_lost_total += og_drop
 
@@ -132,9 +148,16 @@ try:
                 new_frame = res.orig_img.copy()
 
                 if res.get_number_of_boxes() > 0:
-                    draw_boxes(og_frame_w_boxes, res)
-                    draw_boxes(new_frame, res)
-                    res_w_interp = interpolate_missing_boxes(results_trough_time, target_index)
+                    # If the results are from a file, it means that they already have the interpolated boxes, so we don't need to interpolate them again
+                    if args.from_results_file:
+                        res_raw = res.get_only_interpolated_results(invert=True)
+                        draw_boxes(og_frame_w_boxes, res_raw)
+                        draw_boxes(new_frame, res_raw)
+                        res_w_interp = res.get_only_interpolated_results()
+                    else:
+                        draw_boxes(og_frame_w_boxes, res)
+                        draw_boxes(new_frame, res)
+                        res_w_interp = interpolate_missing_boxes(results_trough_time, target_index)
                     if res_w_interp.get_number_of_boxes() > 0:
                         draw_interpolated_boxes(new_frame, res_w_interp)
                     n_interp_boxes = res_w_interp.get_number_of_boxes()                    
@@ -163,7 +186,7 @@ try:
             frame_index += 1
             prev_box_count = current_box_count
 
-        results_trough_time.append(ReductedResults.from_boxes(frame_index, r.orig_img, r.boxes))
+        results_trough_time.append(r)
         if len(results_trough_time) > length_of_buffer:
             results_trough_time.pop(0)
 
@@ -171,6 +194,7 @@ except KeyboardInterrupt:
     print("Process interrupted by user.")
 finally:
     results.close()  # Ensure resources are released
+    results_file.close() if args.from_results_file else None
     if args.save:
         flush_results_buffers(raw_results_to_save_buffer, edited_results_to_save_buffer, file_name)
     if args.show:

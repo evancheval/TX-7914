@@ -59,7 +59,7 @@ def interpolate_missing_boxes(results_list: list[ReductedResults], target_index:
         xyxys=np.array(list(interpolated.values())),
         confs=np.array([None] * len(interpolated)),
         ids=np.array(list(interpolated.keys())),
-        interpolated = True
+        interpolated = [True] * len(interpolated)
     )
 
     return interpolated_results
