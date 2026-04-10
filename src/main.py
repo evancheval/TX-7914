@@ -9,7 +9,7 @@ import csv
 from my_types import ReductedResults
 from utils.showing import write_title, write_lost_counter, draw_boxes, draw_interpolated_boxes
 from utils.lin_inter_using_ids import interpolate_missing_boxes
-from utils.saving import init_output_files, flush_results_buffers
+from utils.saving import init_output_files, flush_results_buffers, init_output_video, OUTPUT_FOLDER_PATH
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -30,6 +30,11 @@ def parse_args() -> argparse.Namespace:
         "--from-results-file",
         help="Path to a csv file containing precomputed results (got from the --save flag)",
     )
+    parser.add_argument(
+        "--save-video",
+        action="store_true",
+        help="Save tracking output video to disk",
+    ),
     parser.add_argument(
         "--model_path",
         default="models/yolo26n.pt",
@@ -100,10 +105,16 @@ try:
     raw_results_to_save_buffer: list[ReductedResults] = [] # List of ReductedResults to save to csv at the end of processing
     edited_results_to_save_buffer: list[ReductedResults] = [] # List of ReductedResults with interpolated boxes added, to save to csv at the end of processing
 
+    if args.from_results_file or args.save_video:
+        cap = cv2.VideoCapture(args.input)
+    
+        if args.save_video:
+            video_out = init_output_video(file_name, cap)
+
     if args.from_results_file:
         results_file = open(args.from_results_file, "r")
         csv_reader = csv.DictReader(results_file)
-        results: Generator[ReductedResults] = ReductedResults.reducted_results_from_dict_reader(csv_reader, capture=cv2.VideoCapture(args.input))
+        results: Generator[ReductedResults] = ReductedResults.reducted_results_from_dict_reader(csv_reader, capture=cap)
 
     else:            
         model_source = args.model_path
@@ -143,7 +154,7 @@ try:
             og_drop = max(0, prev_box_count - current_box_count)
             og_lost_total += og_drop
 
-            if args.show or args.save:
+            if args.show or args.save or args.save_video:
                 og_frame_w_boxes = res.orig_img.copy()
                 new_frame = res.orig_img.copy()
 
@@ -172,6 +183,8 @@ try:
                 write_title(new_frame, title="Output")
 
                 concat_frame = cv2.hconcat([og_frame_w_boxes, new_frame])
+                if args.save_video:
+                    video_out.write(concat_frame)
                 if args.show:
                     cv2.imshow("Tracking", concat_frame)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -195,8 +208,14 @@ except KeyboardInterrupt:
 finally:
     results.close()  # Ensure resources are released
     results_file.close() if args.from_results_file else None
+    if args.save_video or args.from_results_file:
+        cap.release()
+        if args.save_video:
+            video_out.release()
+            print("Output video saved to:", OUTPUT_FOLDER_PATH(file_name))
     if args.save:
         flush_results_buffers(raw_results_to_save_buffer, edited_results_to_save_buffer, file_name)
+        print("Tracking results saved to:", OUTPUT_FOLDER_PATH(file_name))
     if args.show:
         time.sleep(1)
         cv2.destroyAllWindows()

@@ -1,9 +1,9 @@
-data/*
+data/
 .python-version
-.vscode/*
-annotation/*
+.vscode/
+annotation/
 runs/*
-models/*
+models/
 venv/*
 .venv/*
 __pycache__/
